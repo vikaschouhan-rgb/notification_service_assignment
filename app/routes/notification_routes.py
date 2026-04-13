@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
@@ -15,19 +16,11 @@ from app.schemas.notification_schema import (
 
 from app.services.notification_service import notification_service
 
+# Logger setup
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
-
-# -------------------------------------------------
-# Helper: Map DB -> Response Schema
-# -------------------------------------------------
-# def map_preferences(pref: UserPreference) -> PreferencesResponse:
-#     return PreferencesResponse(
-#         user_id=pref.user_id,
-#         email=pref.email_enabled,
-#         sms=pref.sms_enabled,
-#         push=pref.push_enabled
-#     )
 
 def map_preferences(pref: UserPreference):
     return PreferencesResponse(
@@ -40,172 +33,148 @@ def map_preferences(pref: UserPreference):
 
 # -------------------------------------------------
 # 1) POST /notifications
-# Create notification
 # -------------------------------------------------
-@router.post(
-    "/notifications",
-    response_model=NotificationResponse,
-    status_code=status.HTTP_201_CREATED
-)
+@router.post("/notifications", response_model=NotificationResponse, status_code=201)
 def create_notification(request: NotificationCreate):
-    notification = notification_service.create_notification(request)
-    return notification
+    try:
+        notification = notification_service.create_notification(request)
+        logger.info(f"Notification created for user_id={request.user_id}")
+        return notification
+
+    except ValueError as e:
+        logger.warning(f"Validation error: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+    except Exception as e:
+        logger.error(f"Internal error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # -------------------------------------------------
 # 2) GET /notifications
-# Get all notifications
 # -------------------------------------------------
-@router.get(
-    "/notifications",
-    response_model=List[NotificationResponse],
-    status_code=status.HTTP_200_OK
-)
+@router.get("/notifications", response_model=List[NotificationResponse])
 def get_notifications():
-    return notification_service.get_all_notifications()
+    try:
+        data = notification_service.get_all_notifications()
+        logger.info("Fetched all notifications")
+        return data
+
+    except Exception as e:
+        logger.error(f"Error fetching notifications: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # -------------------------------------------------
 # 3) GET /notifications/{id}
-# Get notification status
 # -------------------------------------------------
-@router.get(
-    "/notifications/{notification_id}",
-    response_model=NotificationResponse,
-    status_code=status.HTTP_200_OK
-)
-def get_notification_status(
-    notification_id: int,
-    db: Session = Depends(get_db)
-):
-    notification = (
-        db.query(Notification)
-        .filter(Notification.id == notification_id)
-        .first()
-    )
-
-    if not notification:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Notification not found"
+@router.get("/notifications/{notification_id}", response_model=NotificationResponse)
+def get_notification_status(notification_id: int, db: Session = Depends(get_db)):
+    try:
+        notification = (
+            db.query(Notification)
+            .filter(Notification.id == notification_id)
+            .first()
         )
 
-    return notification
+        if not notification:
+            logger.warning(f"Notification {notification_id} not found")
+            raise HTTPException(status_code=404, detail="Notification not found")
+
+        return notification
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error(f"Error fetching notification {notification_id}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # -------------------------------------------------
 # 4) GET /users/{user_id}/notifications
-# Get user notification history
 # -------------------------------------------------
-@router.get(
-    "/users/{user_id}/notifications",
-    response_model=List[NotificationResponse],
-    status_code=status.HTTP_200_OK
-)
-def get_user_notifications(
-    user_id: int,
-    db: Session = Depends(get_db)
-):
-    notifications = (
-        db.query(Notification)
-        .filter(Notification.user_id == user_id)
-        .order_by(Notification.created_at.desc())
-        .all()
-    )
+@router.get("/users/{user_id}/notifications", response_model=List[NotificationResponse])
+def get_user_notifications(user_id: int, db: Session = Depends(get_db)):
+    try:
+        notifications = (
+            db.query(Notification)
+            .filter(Notification.user_id == user_id)
+            .order_by(Notification.created_at.desc())
+            .all()
+        )
 
-    return notifications  # empty list is OK
+        logger.info(f"Fetched notifications for user_id={user_id}")
+        return notifications
+
+    except Exception as e:
+        logger.error(f"Error fetching user notifications: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # -------------------------------------------------
 # 5) POST /users/{user_id}/preferences
-# Create or update user preferences
 # -------------------------------------------------
-@router.post(
-    "/users/{user_id}/preferences",
-    response_model=PreferencesResponse,
-    status_code=status.HTTP_200_OK
-)
+@router.post("/users/{user_id}/preferences", response_model=PreferencesResponse)
 def set_user_preferences(
     user_id: int,
     request: PreferencesRequest,
     db: Session = Depends(get_db)
 ):
-    preferences = (
-        db.query(UserPreference)
-        .filter(UserPreference.user_id == user_id)
-        .first()
-    )
-
-    if preferences:
-        # Update
-        preferences.email_enabled = request.email
-        preferences.sms_enabled = request.sms
-        preferences.push_enabled = request.push
-    else:
-        # Create
-        preferences = UserPreference(
-            user_id=user_id,
-            email_enabled=request.email,
-            sms_enabled=request.sms,
-            push_enabled=request.push
+    try:
+        preferences = (
+            db.query(UserPreference)
+            .filter(UserPreference.user_id == user_id)
+            .first()
         )
-        db.add(preferences)
 
-    db.commit()
-    db.refresh(preferences)
+        if preferences:
+            preferences.email_enabled = request.email
+            preferences.sms_enabled = request.sms
+            preferences.push_enabled = request.push
+            logger.info(f"Updated preferences for user_id={user_id}")
+        else:
+            preferences = UserPreference(
+                user_id=user_id,
+                email_enabled=request.email,
+                sms_enabled=request.sms,
+                push_enabled=request.push
+            )
+            db.add(preferences)
+            logger.info(f"Created preferences for user_id={user_id}")
 
-    return map_preferences(preferences)
+        db.commit()
+        db.refresh(preferences)
+
+        return map_preferences(preferences)
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error setting preferences: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # -------------------------------------------------
 # 6) GET /users/{user_id}/preferences
-# Get user preferences
 # -------------------------------------------------
-@router.get(
-    "/users/{user_id}/preferences",
-    response_model=PreferencesResponse,
-    status_code=status.HTTP_200_OK
-)
-def get_user_preferences(
-    user_id: int,
-    db: Session = Depends(get_db)
-):
-    preferences = (
-        db.query(UserPreference)
-        .filter(UserPreference.user_id == user_id)
-        .first()
-    )
-
-    if not preferences:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User preferences not found"
+@router.get("/users/{user_id}/preferences", response_model=PreferencesResponse)
+def get_user_preferences(user_id: int, db: Session = Depends(get_db)):
+    try:
+        preferences = (
+            db.query(UserPreference)
+            .filter(UserPreference.user_id == user_id)
+            .first()
         )
 
-    return map_preferences(preferences)
+        if not preferences:
+            logger.warning(f"Preferences not found for user_id={user_id}")
+            raise HTTPException(status_code=404, detail="User preferences not found")
 
-# -------------------------------------------------
-# IMPORTANT: Add preference check before sending
-# -------------------------------------------------
+        return map_preferences(preferences)
 
-# def check_user_channel_enabled(user_id: int, channel: str, db: Session):
-#     preferences = (
-#         db.query(UserPreferences)
-#         .filter(UserPreferences.user_id == user_id)
-#         .first()
-#     )
+    except HTTPException:
+        raise
 
-#     if not preferences:
-#         return True
-
-#     if channel == "email" and not preferences.email:
-#         return False
-
-#     if channel == "sms" and not preferences.sms:
-#         return False
-
-#     if channel == "push" and not preferences.push:
-#         return False
-
-#     return True
-
+    except Exception as e:
+        logger.error(f"Error fetching preferences: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
